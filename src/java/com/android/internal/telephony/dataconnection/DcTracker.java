@@ -135,6 +135,13 @@ public class DcTracker extends DcTrackerBase {
     private static final String PROPERTY_CDMA_ROAMING_IPPROTOCOL = SystemProperties.get(
             "persist.telephony.cdma.rproto", "IP");
 
+    /*
+     * Flag that indicates that Out Of Service is considered as data call disconnect
+     */
+    protected boolean mOosIsDisconnect = SystemProperties.getBoolean(
+            PhoneBase.PROPERTY_OOS_IS_DISCONNECT, true);
+
+
     private boolean mCanSetPreferApn = false;
 
     private AtomicBoolean mAttached = new AtomicBoolean(false);
@@ -516,11 +523,18 @@ public class DcTracker extends DcTrackerBase {
     @Override
     public synchronized int enableApnType(String apnType) {
         ApnContext apnContext = mApnContexts.get(apnType);
+        ApnContext apnContextDefault = mApnContexts.get(PhoneConstants.APN_TYPE_DEFAULT);
+
         if (apnContext == null || (!TextUtils.equals(apnType, PhoneConstants.APN_TYPE_DEFAULT)
                 && !isApnTypeAvailable(apnType))) {
             if (DBG) log("enableApnType: " + apnType + " is type not available");
             return PhoneConstants.APN_TYPE_NOT_AVAILABLE;
         }
+
+        if ((apnType != PhoneConstants.APN_TYPE_DEFAULT) && (apnContextDefault.getState() == DctConstants.State.DISCONNECTING)) {
+            if (DBG) log("enableApnType: Cancel setup of apn " + apnType + " while apn DEFAULT is disconnecting");
+            return PhoneConstants.APN_REQUEST_FAILED;
+       }
 
         // If already active, return
         if (DBG) log("enableApnType: " + apnType + " mState(" + apnContext.getState() + ")");
@@ -854,7 +868,7 @@ public class DcTracker extends DcTrackerBase {
     // Disabled apn's still need avail/unavail notificiations - send them out
     protected void notifyOffApnsOfAvailability(String reason) {
         for (ApnContext apnContext : mApnContexts.values()) {
-            if (!mAttached.get() || !apnContext.isReady()) {
+            if ((!mAttached.get() && mOosIsDisconnect) || !apnContext.isReady()) {
                 if (VDBG) {
                     log("notifyOffApnOfAvailability type:" +
                             apnContext.getDataProfileType());
@@ -1190,11 +1204,14 @@ public class DcTracker extends DcTrackerBase {
         if (apnSetting == null) {
             if(PhoneConstants.PHONE_TYPE_CDMA==mPhone.getPhoneType()) {
                 String[] mDunApnTypes = { PhoneConstants.APN_TYPE_DUN };
-                final int mDefaultApnId = DctConstants.APN_DEFAULT_ID;
                 final String[] mDefaultApnTypes = {
                     PhoneConstants.APN_TYPE_DEFAULT,
                     PhoneConstants.APN_TYPE_MMS,
-                    PhoneConstants.APN_TYPE_HIPRI };
+                    PhoneConstants.APN_TYPE_SUPL,
+                    PhoneConstants.APN_TYPE_HIPRI,
+                    PhoneConstants.APN_TYPE_FOTA,
+                    PhoneConstants.APN_TYPE_IMS,
+                    PhoneConstants.APN_TYPE_CBS };
                 String[] types;
                 int apnId;
                 if (mRequestedApnType.equals(PhoneConstants.APN_TYPE_DUN)) {
@@ -1202,10 +1219,12 @@ public class DcTracker extends DcTrackerBase {
                     apnId = DctConstants.APN_DUN_ID;
                 } else {
                     types = mDefaultApnTypes;
-                    apnId = mDefaultApnId;
+                    apnId = DctConstants.APN_DEFAULT_ID;
                 }
-                apnSetting = new ApnSetting(apnId, "", "", "", "", "", "", "", "", "",
-                                            "", 0, types, "IP", "IP", true, 0);
+                apnSetting = new ApnSetting(apnId, getOperatorNumeric(), null, null,
+                                            null, null, null, null, null, null, null,
+                                            RILConstants.SETUP_DATA_AUTH_PAP_CHAP, types,
+                                            PROPERTY_CDMA_IPPROTOCOL, PROPERTY_CDMA_ROAMING_IPPROTOCOL, true, 0);
                 if (DBG) log("setupData: CDMA detected and apnSetting == null, use stubbed CDMA APN setting= " + apnSetting);
             } else {
                 if (DBG) log("setupData: return for no apn found!");
@@ -2179,7 +2198,7 @@ public class DcTracker extends DcTrackerBase {
     protected void notifyDataConnection(String reason) {
         if (DBG) log("notifyDataConnection: reason=" + reason);
         for (ApnContext apnContext : mApnContexts.values()) {
-            if (mAttached.get() && apnContext.isReady()) {
+            if ((mAttached.get() || !mOosIsDisconnect) && apnContext.isReady()) {
                 if (DBG) log("notifyDataConnection: type:" + apnContext.getDataProfileType());
                 mPhone.notifyDataConnection(reason != null ? reason : apnContext.getReason(),
                         apnContext.getDataProfileType());
